@@ -2,14 +2,14 @@ package brave.spring.messaging;
 
 import brave.propagation.Propagation;
 import brave.propagation.PropagationSetterTest;
-import java.util.Collections;
 import org.springframework.messaging.support.MessageHeaderAccessor;
+import org.springframework.messaging.support.NativeMessageHeaderAccessor;
 
-import static brave.spring.messaging.TracingChannelInterceptor.SETTER;
-
-public class MessageHeaderAccessorSetterTest
+/** Tests that native headers are redundantly added */
+public class MessageHeaderPropagation_NativeTest
     extends PropagationSetterTest<MessageHeaderAccessor, String> {
-  MessageHeaderAccessor carrier = new MessageHeaderAccessor();
+  NativeMessageHeaderAccessor carrier = new NativeMessageHeaderAccessor() {
+  };
 
   @Override public Propagation.KeyFactory<String> keyFactory() {
     return Propagation.KeyFactory.STRING;
@@ -20,11 +20,10 @@ public class MessageHeaderAccessorSetterTest
   }
 
   @Override protected Propagation.Setter<MessageHeaderAccessor, String> setter() {
-    return SETTER;
+    return MessageHeaderPropagation.INSTANCE;
   }
 
   @Override protected Iterable<String> read(MessageHeaderAccessor carrier, String key) {
-    Object result = carrier.getHeader(key);
-    return result != null ? Collections.singleton(result.toString()) : Collections.emptyList();
+    return ((NativeMessageHeaderAccessor) carrier).getNativeHeader(key);
   }
 }
