@@ -7,11 +7,11 @@ import java.util.List;
 import java.util.Map;
 import org.junit.After;
 import org.junit.Test;
+import org.springframework.integration.channel.QueueChannel;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.MessageChannel;
 import org.springframework.messaging.support.ChannelInterceptor;
 import org.springframework.messaging.support.ChannelInterceptorAdapter;
-import org.springframework.messaging.support.ExecutorSubscribableChannel;
 import org.springframework.messaging.support.MessageBuilder;
 import org.springframework.messaging.support.NativeMessageHeaderAccessor;
 import zipkin2.Span;
@@ -26,19 +26,15 @@ public class TracingChannelInterceptorTest {
       .spanReporter(spans::add)
       .build());
 
-  List<Message<?>> messages = new ArrayList<>();
-  ExecutorSubscribableChannel channel = new ExecutorSubscribableChannel();
+  QueueChannel channel = new QueueChannel();
 
   @Test public void injectsProducerSpan() {
     channel.addInterceptor(producerSideOnly(interceptor));
-    channel.subscribe(messages::add);
 
     channel.send(MessageBuilder.withPayload("foo").build());
 
-    assertThat(messages)
-        .hasSize(1)
-        .flatExtracting(s -> s.getHeaders().keySet())
-        .contains("id", "X-B3-TraceId", "X-B3-SpanId", "X-B3-Sampled");
+    assertThat(channel.receive().getHeaders())
+        .containsOnlyKeys("id", "X-B3-TraceId", "X-B3-SpanId", "X-B3-Sampled", "nativeHeaders");
     assertThat(spans)
         .hasSize(1)
         .flatExtracting(Span::kind)
@@ -47,19 +43,15 @@ public class TracingChannelInterceptorTest {
 
   @Test public void injectsProducerSpan_nativeHeaders() {
     channel.addInterceptor(producerSideOnly(interceptor));
-    channel.subscribe(messages::add);
 
     channel.send(MessageBuilder.withPayload("foo").build());
 
-    assertThat(messages)
-        .hasSize(1)
-        .flatExtracting(s -> ((Map) s.getHeaders().get(NATIVE_HEADERS)).keySet())
-        .containsExactly("X-B3-TraceId", "X-B3-SpanId", "X-B3-Sampled");
+    assertThat((Map) channel.receive().getHeaders().get(NATIVE_HEADERS))
+        .containsOnlyKeys("X-B3-TraceId", "X-B3-SpanId", "X-B3-Sampled");
   }
 
   @Test public void producerRemovesOldSpanIds() {
     channel.addInterceptor(producerSideOnly(interceptor));
-    channel.subscribe(messages::add);
 
     channel.send(MessageBuilder.withPayload("foo")
         .setHeader("X-B3-TraceId", "a")
@@ -67,19 +59,13 @@ public class TracingChannelInterceptorTest {
         .setHeader("X-B3-SpanId", "a")
         .build());
 
-    assertThat(messages)
-        .hasSize(1)
-        .flatExtracting(s -> s.getHeaders().keySet())
-        .doesNotContain("X-B3-ParentSpanId");
-    assertThat(messages)
-        .hasSize(1)
-        .flatExtracting(s -> s.getHeaders().values())
-        .doesNotContain("a");
+    assertThat(channel.receive().getHeaders())
+        .doesNotContainKey("X-B3-ParentSpanId")
+        .doesNotContainValue("a");
   }
 
   @Test public void producerRemovesOldSpanIds_nativeHeaders() {
     channel.addInterceptor(producerSideOnly(interceptor));
-    channel.subscribe(messages::add);
 
     NativeMessageHeaderAccessor accessor = new NativeMessageHeaderAccessor() {
     };
@@ -92,14 +78,22 @@ public class TracingChannelInterceptorTest {
         .copyHeaders(accessor.toMessageHeaders())
         .build());
 
-    assertThat(messages)
+    assertThat((Map) channel.receive().getHeaders().get(NATIVE_HEADERS))
+        .doesNotContainKey("X-B3-ParentSpanId")
+        .doesNotContainValue(Collections.singletonList("a"));
+  }
+
+  @Test public void newConsumerSpan() {
+    channel.addInterceptor(consumerSideOnly(interceptor));
+
+    channel.send(MessageBuilder.withPayload("foo").build());
+
+    assertThat(channel.receive().getHeaders())
+        .containsOnlyKeys("id", "X-B3-TraceId", "X-B3-SpanId", "X-B3-Sampled", "nativeHeaders");
+    assertThat(spans)
         .hasSize(1)
-        .flatExtracting(s -> ((Map) s.getHeaders().get(NATIVE_HEADERS)).keySet())
-        .doesNotContain("X-B3-ParentSpanId");
-    assertThat(messages)
-        .hasSize(1)
-        .flatExtracting(s -> ((Map) s.getHeaders().get(NATIVE_HEADERS)).values())
-        .doesNotContain(Collections.singletonList("a"));
+        .flatExtracting(Span::kind)
+        .containsExactly(Span.Kind.CONSUMER);
   }
 
   /**
@@ -116,6 +110,23 @@ public class TracingChannelInterceptorTest {
       public void afterSendCompletion(Message<?> message, MessageChannel channel, boolean sent,
           Exception ex) {
         interceptor.afterSendCompletion(message, channel, sent, ex);
+      }
+    };
+  }
+
+  /**
+   * The handler is written to be global, meaning it does both producer and consumer side. This
+   * masks so we can test only the consumer side of tracing.
+   */
+  ChannelInterceptor consumerSideOnly(ChannelInterceptor interceptor) {
+    return new ChannelInterceptorAdapter() {
+      @Override public Message<?> postReceive(Message<?> message, MessageChannel channel) {
+        return interceptor.postReceive(message, channel);
+      }
+
+      @Override
+      public void afterReceiveCompletion(Message<?> message, MessageChannel channel, Exception ex) {
+        interceptor.afterReceiveCompletion(message, channel, ex);
       }
     };
   }

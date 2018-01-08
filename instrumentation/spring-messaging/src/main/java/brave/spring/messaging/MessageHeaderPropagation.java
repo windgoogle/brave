@@ -42,6 +42,20 @@ enum MessageHeaderPropagation implements
     return result != null ? result.toString() : null;
   }
 
+  static void removeAnyTraceHeaders(MessageHeaderAccessor accessor, List<String> keysToRemove) {
+    for (String keyToRemove : keysToRemove) {
+      accessor.removeHeader(keyToRemove);
+      if (accessor instanceof NativeMessageHeaderAccessor) {
+        NativeMessageHeaderAccessor nativeAccessor = (NativeMessageHeaderAccessor) accessor;
+        nativeAccessor.removeNativeHeader(keyToRemove);
+      } else {
+        Map<String, List<String>> nativeHeaders = (Map) accessor.getHeader(NATIVE_HEADERS);
+        if (nativeHeaders == null) continue;
+        nativeHeaders.remove(keyToRemove);
+      }
+    }
+  }
+
   @Override public String toString() {
     return "MessageHeaderPropagation{}";
   }

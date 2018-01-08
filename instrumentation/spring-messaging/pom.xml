@@ -37,7 +37,12 @@
       <artifactId>brave-tests</artifactId>
       <scope>test</scope>
     </dependency>
-
+    <dependency>
+      <groupId>org.springframework.integration</groupId>
+      <artifactId>spring-integration-core</artifactId>
+      <version>5.0.0.RELEASE</version>
+      <scope>provided</scope>
+    </dependency>
     <dependency>
       <groupId>com.github.charithe</groupId>
       <artifactId>kafka-junit</artifactId>

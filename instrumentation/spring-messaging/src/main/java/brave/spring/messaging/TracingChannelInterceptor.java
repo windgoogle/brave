@@ -6,24 +6,15 @@ import brave.internal.Nullable;
 import brave.propagation.ThreadLocalSpan;
 import brave.propagation.TraceContext;
 import brave.propagation.TraceContextOrSamplingFlags;
-import java.util.List;
-import java.util.Map;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.MessageChannel;
-import org.springframework.messaging.MessageHandler;
 import org.springframework.messaging.support.ChannelInterceptor;
 import org.springframework.messaging.support.ChannelInterceptorAdapter;
-import org.springframework.messaging.support.ExecutorChannelInterceptor;
 import org.springframework.messaging.support.GenericMessage;
 import org.springframework.messaging.support.MessageHeaderAccessor;
-import org.springframework.messaging.support.NativeMessageHeaderAccessor;
 
-import static org.springframework.messaging.support.MessageHeaderAccessor.getAccessor;
-import static org.springframework.messaging.support.NativeMessageHeaderAccessor.NATIVE_HEADERS;
-
-public final class TracingChannelInterceptor extends ChannelInterceptorAdapter implements
-    ExecutorChannelInterceptor {
+public final class TracingChannelInterceptor extends ChannelInterceptorAdapter {
 
   public static ChannelInterceptor create(Tracing httpTracing) {
     return new TracingChannelInterceptor(httpTracing);
@@ -44,7 +35,7 @@ public final class TracingChannelInterceptor extends ChannelInterceptorAdapter i
   @Override public Message<?> preSend(Message<?> message, MessageChannel channel) {
     Span span = threadLocalSpan.next(); // this sets the span in scope until afterSendCompletion
     MessageHeaderAccessor headers = MessageHeaderAccessor.getMutableAccessor(message);
-    removeAnyTraceHeaders(headers);
+    MessageHeaderPropagation.removeAnyTraceHeaders(headers, tracing.propagation().keys());
     injector.inject(span.context(), headers);
     if (!span.isNoop()) span.kind(Span.Kind.PRODUCER).start();
     // TODO topic etc
@@ -59,35 +50,25 @@ public final class TracingChannelInterceptor extends ChannelInterceptorAdapter i
     finish(span, ex);
   }
 
-  @Override public Message<?> beforeHandle(Message<?> message, MessageChannel messageChannel,
-      MessageHandler messageHandler) {
-    MessageHeaderAccessor headers = getAccessor(message, MessageHeaderAccessor.class);
+  @Override public Message<?> postReceive(Message<?> message, MessageChannel channel) {
+    MessageHeaderAccessor headers = MessageHeaderAccessor.getMutableAccessor(message);
     TraceContextOrSamplingFlags extracted = extractor.extract(headers);
-    Span span = threadLocalSpan.next(extracted);// this sets the span in scope until afterHandle
+    Span span = threadLocalSpan.next(extracted); // this sets the span in scope until afterHandle
+
+    // replace the headers with the consumer span
+    MessageHeaderPropagation.removeAnyTraceHeaders(headers, tracing.propagation().keys());
+    injector.inject(span.context(), headers);
+
     if (!span.isNoop()) span.kind(Span.Kind.CONSUMER).start();
     // TODO topic etc
-    return message;
+    return new GenericMessage<>(message.getPayload(), headers.getMessageHeaders());
   }
 
-  @Override public void afterMessageHandled(Message<?> message, MessageChannel messageChannel,
-      MessageHandler messageHandler, Exception e) {
+  @Override
+  public void afterReceiveCompletion(Message<?> message, MessageChannel channel, Exception ex) {
     Span span = threadLocalSpan.remove();
     if (span == null || span.isNoop()) return;
-    finish(span, e);
-  }
-
-  void removeAnyTraceHeaders(MessageHeaderAccessor accessor) {
-    for (String keyToRemove : tracing.propagation().keys()) {
-      accessor.removeHeader(keyToRemove);
-      if (accessor instanceof NativeMessageHeaderAccessor) {
-        NativeMessageHeaderAccessor nativeAccessor = (NativeMessageHeaderAccessor) accessor;
-        nativeAccessor.removeNativeHeader(keyToRemove);
-      } else {
-        Map<String, List<String>> nativeHeaders = (Map) accessor.getHeader(NATIVE_HEADERS);
-        if (nativeHeaders == null) continue;
-        nativeHeaders.remove(keyToRemove);
-      }
-    }
+    finish(span, ex);
   }
 
   static void finish(Span span, @Nullable Throwable error) {
