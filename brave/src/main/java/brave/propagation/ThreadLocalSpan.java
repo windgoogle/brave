@@ -94,6 +94,18 @@ public abstract class ThreadLocalSpan {
   abstract Tracer tracer();
 
   /**
+   * Returns the {@link Tracer#nextSpan(TraceContextOrSamplingFlags)} or null if {@link #CURRENT_TRACER}
+   * and tracing isn't available.
+   */
+  @Nullable public Span next(TraceContextOrSamplingFlags extracted) {
+    Tracer tracer = tracer();
+    if (tracer == null) return null;
+    Span next = tracer.nextSpan(extracted);
+    currentSpanInScope.set(tracer.withSpanInScope(next));
+    return next;
+  }
+
+  /**
    * Returns the {@link Tracer#nextSpan()} or null if {@link #CURRENT_TRACER} and tracing isn't
    * available.
    */
