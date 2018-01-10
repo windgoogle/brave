@@ -1,7 +1,6 @@
 package brave.spring.messaging;
 
 import brave.Tracing;
-import brave.propagation.CurrentTraceContext;
 import brave.propagation.StrictCurrentTraceContext;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -112,11 +111,7 @@ public class TracingChannelInterceptorTest {
         .containsOnlyKeys("X-B3-TraceId", "X-B3-SpanId", "X-B3-Sampled");
   }
 
-  /**
-   * A subscriber kicks off processing inline which means we can rely on thread vs message header
-   * propagation
-   */
-  @Test public void subscriber_createsConsumerSpan() {
+  @Test public void subscriber_injectsConsumerSpan() {
     ExecutorSubscribableChannel channel = new ExecutorSubscribableChannel();
     channel.addInterceptor(executorSideOnly(interceptor));
     List<Message<?>> messages = new ArrayList<>();
@@ -124,29 +119,24 @@ public class TracingChannelInterceptorTest {
 
     channel.send(MessageBuilder.withPayload("foo").build());
 
-    assertThat(messages).flatExtracting(m -> m.getHeaders().keySet())
-        .containsExactlyInAnyOrder("id");
+    assertThat(messages.get(0).getHeaders())
+        .containsOnlyKeys("id", "X-B3-TraceId", "X-B3-SpanId", "X-B3-Sampled", "nativeHeaders");
     assertThat(spans)
         .hasSize(1)
         .flatExtracting(Span::kind)
         .containsExactly(Span.Kind.CONSUMER);
   }
 
-  /**
-   * The subscriber side strips trace headers from the message to not confuse which trace we are in.
-   */
-  @Test public void subscriber_createsConsumerSpan_stripsHeaders() {
+  @Test public void subscriber_injectsConsumerSpan_nativeHeaders() {
     ExecutorSubscribableChannel channel = new ExecutorSubscribableChannel();
-    channel.addInterceptor(interceptor);
+    channel.addInterceptor(executorSideOnly(interceptor));
     List<Message<?>> messages = new ArrayList<>();
     channel.subscribe(messages::add);
 
     channel.send(MessageBuilder.withPayload("foo").build());
 
-    assertThat(messages).flatExtracting(m -> m.getHeaders().keySet())
-        .containsExactlyInAnyOrder("id", "nativeHeaders");
-    assertThat(messages).extracting(m -> m.getHeaders().get(NATIVE_HEADERS))
-        .containsExactly(Collections.emptyMap());
+    assertThat((Map) messages.get(0).getHeaders().get(NATIVE_HEADERS))
+        .containsOnlyKeys("X-B3-TraceId", "X-B3-SpanId", "X-B3-Sampled");
   }
 
   @Test public void integrated_sendAndPoll() {

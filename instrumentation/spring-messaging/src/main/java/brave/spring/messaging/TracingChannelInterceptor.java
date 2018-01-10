@@ -2,7 +2,6 @@ package brave.spring.messaging;
 
 import brave.Span;
 import brave.Tracing;
-import brave.internal.Nullable;
 import brave.propagation.ThreadLocalSpan;
 import brave.propagation.TraceContext;
 import brave.propagation.TraceContextOrSamplingFlags;
@@ -43,65 +42,62 @@ public final class TracingChannelInterceptor extends ChannelInterceptorAdapter i
   }
 
   @Override public Message<?> preSend(Message<?> message, MessageChannel channel) {
-    Span span = threadLocalProducerSpan.next(); // removed in afterSendCompletion
     MessageHeaderAccessor headers = MessageHeaderAccessor.getMutableAccessor(message);
-    MessageHeaderPropagation.removeAnyTraceHeaders(headers, tracing.propagation().keys());
-    injector.inject(span.context(), headers);
-    if (!span.isNoop()) span.kind(Span.Kind.PRODUCER).start();
-    // TODO topic etc
+    startProducerSpan(headers);
     return new GenericMessage<>(message.getPayload(), headers.getMessageHeaders());
   }
 
   @Override
   public void afterSendCompletion(Message<?> message, MessageChannel channel, boolean sent,
       Exception ex) {
-    finish(threadLocalProducerSpan, ex);
+    finishSpan(Span.Kind.PRODUCER, ex);
   }
 
   @Override public Message<?> postReceive(Message<?> message, MessageChannel channel) {
     MessageHeaderAccessor headers = MessageHeaderAccessor.getMutableAccessor(message);
-    TraceContextOrSamplingFlags extracted = extractor.extract(headers);
-    Span span = threadLocalConsumerSpan.next(extracted); // removed in afterReceiveCompletion
-
-    // replace the headers with the consumer span
-    MessageHeaderPropagation.removeAnyTraceHeaders(headers, tracing.propagation().keys());
-    injector.inject(span.context(), headers);
-
-    if (!span.isNoop()) span.kind(Span.Kind.CONSUMER).start();
-    // TODO topic etc
+    startConsumerSpan(headers);
     return new GenericMessage<>(message.getPayload(), headers.getMessageHeaders());
   }
 
   @Override
   public void afterReceiveCompletion(Message<?> message, MessageChannel channel, Exception ex) {
-    finish(threadLocalConsumerSpan, ex);
+    finishSpan(Span.Kind.CONSUMER, ex);
   }
 
-  /**
-   * Similar to {@link #postReceive(Message, MessageChannel)}, except it doesn't need to inject the
-   * consumer span back as message headers. Instead, the headers are cleared to eliminate ambiguity.
-   */
   @Override public Message<?> beforeHandle(Message<?> message, MessageChannel channel,
       MessageHandler handler) {
     MessageHeaderAccessor headers = MessageHeaderAccessor.getMutableAccessor(message);
-    TraceContextOrSamplingFlags extracted = extractor.extract(headers);
-    Span span = threadLocalConsumerSpan.next(extracted); // removed in afterMessageHandled
-
-    // replace the headers with the consumer span
-    MessageHeaderPropagation.removeAnyTraceHeaders(headers, tracing.propagation().keys());
-
-    if (!span.isNoop()) span.kind(Span.Kind.CONSUMER).start();
-    // TODO topic etc
+    startConsumerSpan(headers);
     return new GenericMessage<>(message.getPayload(), headers.getMessageHeaders());
   }
 
   @Override public void afterMessageHandled(Message<?> message, MessageChannel channel,
       MessageHandler handler, Exception ex) {
-    finish(threadLocalConsumerSpan, ex);
+    finishSpan(Span.Kind.CONSUMER, ex);
   }
 
-  static void finish(ThreadLocalSpan threadLocalSpan, @Nullable Throwable error) {
-    Span span = threadLocalSpan.remove();
+  /** This starts a producer span as a child of the current trace context */
+  void startProducerSpan(MessageHeaderAccessor headers) {
+    Span span = threadLocalProducerSpan.next();
+    MessageHeaderPropagation.removeAnyTraceHeaders(headers, tracing.propagation().keys());
+    injector.inject(span.context(), headers);
+    if (!span.isNoop()) span.kind(Span.Kind.PRODUCER).start();
+    // TODO topic etc
+  }
+
+  /** This starts a consumer span as a child of the incoming message or the current trace context */
+  void startConsumerSpan(MessageHeaderAccessor headers) {
+    TraceContextOrSamplingFlags extracted = extractor.extract(headers);
+    Span span = threadLocalConsumerSpan.next(extracted);
+
+    MessageHeaderPropagation.removeAnyTraceHeaders(headers, tracing.propagation().keys());
+    injector.inject(span.context(), headers);
+    if (!span.isNoop()) span.kind(Span.Kind.CONSUMER).start();
+    // TODO topic etc
+  }
+
+  void finishSpan(Span.Kind kind, Exception error) {
+    Span span = threadLocalSpan(kind).remove();
     if (span == null || span.isNoop()) return;
     if (error != null) { // an error occurred, adding error to span
       String message = error.getMessage();
@@ -109,5 +105,9 @@ public final class TracingChannelInterceptor extends ChannelInterceptorAdapter i
       span.tag("error", message);
     }
     span.finish();
+  }
+
+  ThreadLocalSpan threadLocalSpan(Span.Kind kind) {
+    return kind == Span.Kind.CONSUMER ? threadLocalConsumerSpan : threadLocalProducerSpan;
   }
 }
