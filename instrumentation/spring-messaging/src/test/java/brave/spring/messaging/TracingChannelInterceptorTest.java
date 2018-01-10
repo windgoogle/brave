@@ -1,6 +1,8 @@
 package brave.spring.messaging;
 
 import brave.Tracing;
+import brave.propagation.CurrentTraceContext;
+import brave.propagation.StrictCurrentTraceContext;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -10,8 +12,11 @@ import org.junit.Test;
 import org.springframework.integration.channel.QueueChannel;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.MessageChannel;
+import org.springframework.messaging.MessageHandler;
 import org.springframework.messaging.support.ChannelInterceptor;
 import org.springframework.messaging.support.ChannelInterceptorAdapter;
+import org.springframework.messaging.support.ExecutorChannelInterceptor;
+import org.springframework.messaging.support.ExecutorSubscribableChannel;
 import org.springframework.messaging.support.MessageBuilder;
 import org.springframework.messaging.support.NativeMessageHeaderAccessor;
 import zipkin2.Span;
@@ -23,6 +28,7 @@ public class TracingChannelInterceptorTest {
 
   List<Span> spans = new ArrayList<>();
   ChannelInterceptor interceptor = TracingChannelInterceptor.create(Tracing.newBuilder()
+      .currentTraceContext(new StrictCurrentTraceContext())
       .spanReporter(spans::add)
       .build());
 
@@ -83,7 +89,8 @@ public class TracingChannelInterceptorTest {
         .doesNotContainValue(Collections.singletonList("a"));
   }
 
-  @Test public void newConsumerSpan() {
+  /** We have to inject headers on a polling receive as any future processor will come later */
+  @Test public void pollingReceive_injectsConsumerSpan() {
     channel.addInterceptor(consumerSideOnly(interceptor));
 
     channel.send(MessageBuilder.withPayload("foo").build());
@@ -96,42 +103,120 @@ public class TracingChannelInterceptorTest {
         .containsExactly(Span.Kind.CONSUMER);
   }
 
+  @Test public void pollingReceive_injectsConsumerSpan_nativeHeaders() {
+    channel.addInterceptor(consumerSideOnly(interceptor));
+
+    channel.send(MessageBuilder.withPayload("foo").build());
+
+    assertThat((Map) channel.receive().getHeaders().get(NATIVE_HEADERS))
+        .containsOnlyKeys("X-B3-TraceId", "X-B3-SpanId", "X-B3-Sampled");
+  }
+
   /**
-   * The handler is written to be global, meaning it does both producer and consumer side. This
-   * masks so we can test only the producer side of tracing.
+   * A subscriber kicks off processing inline which means we can rely on thread vs message header
+   * propagation
    */
-  ChannelInterceptor producerSideOnly(ChannelInterceptor interceptor) {
+  @Test public void subscriber_createsConsumerSpan() {
+    ExecutorSubscribableChannel channel = new ExecutorSubscribableChannel();
+    channel.addInterceptor(executorSideOnly(interceptor));
+    List<Message<?>> messages = new ArrayList<>();
+    channel.subscribe(messages::add);
+
+    channel.send(MessageBuilder.withPayload("foo").build());
+
+    assertThat(messages).flatExtracting(m -> m.getHeaders().keySet())
+        .containsExactlyInAnyOrder("id");
+    assertThat(spans)
+        .hasSize(1)
+        .flatExtracting(Span::kind)
+        .containsExactly(Span.Kind.CONSUMER);
+  }
+
+  /**
+   * The subscriber side strips trace headers from the message to not confuse which trace we are in.
+   */
+  @Test public void subscriber_createsConsumerSpan_stripsHeaders() {
+    ExecutorSubscribableChannel channel = new ExecutorSubscribableChannel();
+    channel.addInterceptor(interceptor);
+    List<Message<?>> messages = new ArrayList<>();
+    channel.subscribe(messages::add);
+
+    channel.send(MessageBuilder.withPayload("foo").build());
+
+    assertThat(messages).flatExtracting(m -> m.getHeaders().keySet())
+        .containsExactlyInAnyOrder("id", "nativeHeaders");
+    assertThat(messages).extracting(m -> m.getHeaders().get(NATIVE_HEADERS))
+        .containsExactly(Collections.emptyMap());
+  }
+
+  @Test public void integrated_sendAndPoll() {
+    channel.addInterceptor(interceptor);
+
+    channel.send(MessageBuilder.withPayload("foo").build());
+    channel.receive();
+
+    assertThat(spans)
+        .flatExtracting(Span::kind)
+        .containsExactlyInAnyOrder(Span.Kind.CONSUMER, Span.Kind.PRODUCER);
+  }
+
+  @Test public void integrated_sendAndSubscriber() {
+    ExecutorSubscribableChannel channel = new ExecutorSubscribableChannel();
+    channel.addInterceptor(interceptor);
+    List<Message<?>> messages = new ArrayList<>();
+    channel.subscribe(messages::add);
+
+    channel.send(MessageBuilder.withPayload("foo").build());
+
+    assertThat(spans)
+        .flatExtracting(Span::kind)
+        .containsExactly(Span.Kind.CONSUMER, Span.Kind.PRODUCER);
+  }
+
+  ChannelInterceptor producerSideOnly(ChannelInterceptor delegate) {
     return new ChannelInterceptorAdapter() {
       @Override public Message<?> preSend(Message<?> message, MessageChannel channel) {
-        return interceptor.preSend(message, channel);
+        return delegate.preSend(message, channel);
       }
 
       @Override
       public void afterSendCompletion(Message<?> message, MessageChannel channel, boolean sent,
           Exception ex) {
-        interceptor.afterSendCompletion(message, channel, sent, ex);
+        delegate.afterSendCompletion(message, channel, sent, ex);
       }
     };
   }
 
-  /**
-   * The handler is written to be global, meaning it does both producer and consumer side. This
-   * masks so we can test only the consumer side of tracing.
-   */
-  ChannelInterceptor consumerSideOnly(ChannelInterceptor interceptor) {
+  ChannelInterceptor consumerSideOnly(ChannelInterceptor delegate) {
     return new ChannelInterceptorAdapter() {
       @Override public Message<?> postReceive(Message<?> message, MessageChannel channel) {
-        return interceptor.postReceive(message, channel);
+        return delegate.postReceive(message, channel);
       }
 
       @Override
       public void afterReceiveCompletion(Message<?> message, MessageChannel channel, Exception ex) {
-        interceptor.afterReceiveCompletion(message, channel, ex);
+        delegate.afterReceiveCompletion(message, channel, ex);
       }
     };
   }
 
+  ExecutorChannelInterceptor executorSideOnly(ChannelInterceptor delegate) {
+    class ExecutorSideOnly extends ChannelInterceptorAdapter implements ExecutorChannelInterceptor {
+      @Override public Message<?> beforeHandle(Message<?> message, MessageChannel channel,
+          MessageHandler handler) {
+        return ((ExecutorChannelInterceptor) delegate).beforeHandle(message, channel, handler);
+      }
+
+      @Override public void afterMessageHandled(Message<?> message, MessageChannel channel,
+          MessageHandler handler, Exception ex) {
+        ((ExecutorChannelInterceptor) delegate).afterMessageHandled(message, channel, handler, ex);
+      }
+    }
+    return new ExecutorSideOnly();
+  }
+
   @After public void close() {
+    assertThat(Tracing.current().currentTraceContext().get()).isNull();
     Tracing.current().close();
   }
 }
