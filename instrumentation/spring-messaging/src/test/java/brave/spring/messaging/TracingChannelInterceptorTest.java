@@ -39,7 +39,7 @@ public class TracingChannelInterceptorTest {
     channel.send(MessageBuilder.withPayload("foo").build());
 
     assertThat(channel.receive().getHeaders())
-        .containsOnlyKeys("id", "X-B3-TraceId", "X-B3-SpanId", "X-B3-Sampled", "nativeHeaders");
+        .containsKeys("X-B3-TraceId", "X-B3-SpanId", "X-B3-Sampled", "nativeHeaders");
     assertThat(spans)
         .hasSize(1)
         .flatExtracting(Span::kind)
@@ -55,37 +55,39 @@ public class TracingChannelInterceptorTest {
         .containsOnlyKeys("X-B3-TraceId", "X-B3-SpanId", "X-B3-Sampled");
   }
 
-  @Test public void producerRemovesOldSpanIds() {
+  /**
+   * If the producer is acting on an un-processed message (ex via a polling consumer), it should
+   * look at trace headers when there is no span in scope, and use that as the parent context.
+   */
+  @Test public void producerConsidersOldSpanIds() {
     channel.addInterceptor(producerSideOnly(interceptor));
 
     channel.send(MessageBuilder.withPayload("foo")
-        .setHeader("X-B3-TraceId", "a")
-        .setHeader("X-B3-ParentSpanId", "a")
-        .setHeader("X-B3-SpanId", "a")
+        .setHeader("X-B3-TraceId", "000000000000000a")
+        .setHeader("X-B3-ParentSpanId", "000000000000000a")
+        .setHeader("X-B3-SpanId", "000000000000000b")
         .build());
 
     assertThat(channel.receive().getHeaders())
-        .doesNotContainKey("X-B3-ParentSpanId")
-        .doesNotContainValue("a");
+        .containsEntry("X-B3-ParentSpanId", "000000000000000b");
   }
 
-  @Test public void producerRemovesOldSpanIds_nativeHeaders() {
+  @Test public void producerConsidersOldSpanIds_nativeHeaders() {
     channel.addInterceptor(producerSideOnly(interceptor));
 
     NativeMessageHeaderAccessor accessor = new NativeMessageHeaderAccessor() {
     };
 
-    accessor.setNativeHeader("X-B3-TraceId", "a");
-    accessor.setNativeHeader("X-B3-ParentSpanId", "a");
-    accessor.setNativeHeader("X-B3-SpanId", "a");
+    accessor.setNativeHeader("X-B3-TraceId", "000000000000000a");
+    accessor.setNativeHeader("X-B3-ParentSpanId", "000000000000000a");
+    accessor.setNativeHeader("X-B3-SpanId", "000000000000000b");
 
     channel.send(MessageBuilder.withPayload("foo")
         .copyHeaders(accessor.toMessageHeaders())
         .build());
 
     assertThat((Map) channel.receive().getHeaders().get(NATIVE_HEADERS))
-        .doesNotContainKey("X-B3-ParentSpanId")
-        .doesNotContainValue(Collections.singletonList("a"));
+        .containsEntry("X-B3-ParentSpanId", Collections.singletonList("000000000000000b"));
   }
 
   /** We have to inject headers on a polling receive as any future processor will come later */
@@ -95,7 +97,7 @@ public class TracingChannelInterceptorTest {
     channel.send(MessageBuilder.withPayload("foo").build());
 
     assertThat(channel.receive().getHeaders())
-        .containsOnlyKeys("id", "X-B3-TraceId", "X-B3-SpanId", "X-B3-Sampled", "nativeHeaders");
+        .containsKeys("X-B3-TraceId", "X-B3-SpanId", "X-B3-Sampled", "nativeHeaders");
     assertThat(spans)
         .hasSize(1)
         .flatExtracting(Span::kind)
@@ -111,7 +113,7 @@ public class TracingChannelInterceptorTest {
         .containsOnlyKeys("X-B3-TraceId", "X-B3-SpanId", "X-B3-Sampled");
   }
 
-  @Test public void subscriber_injectsConsumerSpan() {
+  @Test public void subscriber_startsAndStopsConsumerAndProcessingSpan() {
     ExecutorSubscribableChannel channel = new ExecutorSubscribableChannel();
     channel.addInterceptor(executorSideOnly(interceptor));
     List<Message<?>> messages = new ArrayList<>();
@@ -120,23 +122,38 @@ public class TracingChannelInterceptorTest {
     channel.send(MessageBuilder.withPayload("foo").build());
 
     assertThat(messages.get(0).getHeaders())
-        .containsOnlyKeys("id", "X-B3-TraceId", "X-B3-SpanId", "X-B3-Sampled", "nativeHeaders");
+        .doesNotContainKeys("X-B3-TraceId", "X-B3-SpanId", "X-B3-Sampled", "nativeHeaders");
     assertThat(spans)
-        .hasSize(1)
         .flatExtracting(Span::kind)
-        .containsExactly(Span.Kind.CONSUMER);
+        .containsExactly(Span.Kind.CONSUMER, null);
   }
 
-  @Test public void subscriber_injectsConsumerSpan_nativeHeaders() {
+  /**
+   * The subscriber consumes a message then synchronously processes it. Since we only inject trace
+   * IDs on unprocessed messages, we remove IDs to prevent accidental re-use of the same span.
+   */
+  @Test public void subscriber_removesTraceIdsFromMessage() {
     ExecutorSubscribableChannel channel = new ExecutorSubscribableChannel();
-    channel.addInterceptor(executorSideOnly(interceptor));
+    channel.addInterceptor(interceptor);
+    List<Message<?>> messages = new ArrayList<>();
+    channel.subscribe(messages::add);
+
+    channel.send(MessageBuilder.withPayload("foo").build());
+
+    assertThat(messages.get(0).getHeaders())
+        .doesNotContainKeys("X-B3-TraceId", "X-B3-SpanId", "X-B3-Sampled");
+  }
+
+  @Test public void subscriber_removesTraceIdsFromMessage_nativeHeaders() {
+    ExecutorSubscribableChannel channel = new ExecutorSubscribableChannel();
+    channel.addInterceptor(interceptor);
     List<Message<?>> messages = new ArrayList<>();
     channel.subscribe(messages::add);
 
     channel.send(MessageBuilder.withPayload("foo").build());
 
     assertThat((Map) messages.get(0).getHeaders().get(NATIVE_HEADERS))
-        .containsOnlyKeys("X-B3-TraceId", "X-B3-SpanId", "X-B3-Sampled");
+        .doesNotContainKeys("X-B3-TraceId", "X-B3-SpanId", "X-B3-Sampled");
   }
 
   @Test public void integrated_sendAndPoll() {
@@ -160,7 +177,7 @@ public class TracingChannelInterceptorTest {
 
     assertThat(spans)
         .flatExtracting(Span::kind)
-        .containsExactly(Span.Kind.CONSUMER, Span.Kind.PRODUCER);
+        .containsExactly(Span.Kind.CONSUMER, null, Span.Kind.PRODUCER);
   }
 
   ChannelInterceptor producerSideOnly(ChannelInterceptor delegate) {

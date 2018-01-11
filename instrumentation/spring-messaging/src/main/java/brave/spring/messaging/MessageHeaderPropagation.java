@@ -37,6 +37,12 @@ enum MessageHeaderPropagation implements
       NativeMessageHeaderAccessor nativeAccessor = (NativeMessageHeaderAccessor) accessor;
       String result = nativeAccessor.getFirstNativeHeader(key);
       if (result != null) return result;
+    } else {
+      Map<String, List<String>> nativeHeaders = (Map) accessor.getHeader(NATIVE_HEADERS);
+      if (nativeHeaders != null) {
+        List<String> result = nativeHeaders.get(key);
+        if (result != null && !result.isEmpty()) return result.get(0);
+      }
     }
     Object result = accessor.getHeader(key);
     return result != null ? result.toString() : null;
