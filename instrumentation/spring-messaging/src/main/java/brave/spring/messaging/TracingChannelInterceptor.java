@@ -108,29 +108,23 @@ public final class TracingChannelInterceptor extends ChannelInterceptorAdapter i
   }
 
   /**
-   * This starts a consumer span as a child of the incoming message or the current trace context.
-   * It then creates a span for the handler, placing it in scope.
+   * This starts a span as a child of the incoming message or the current trace context.
+   *
+   * <p>We don't set {@link Span#kind(Span.Kind)} as it isn't likely the direct ancestor is a
+   * remote message producer.
    */
   @Override public Message<?> beforeHandle(Message<?> message, MessageChannel channel,
       MessageHandler handler) {
     MessageHeaderAccessor headers = mutableHeaderAccessor(message);
     TraceContextOrSamplingFlags extracted = extractor.extract(headers);
-
-    // Start and finish a consumer span as we will immediately process it.
-    Span consumerSpan = tracing.tracer().nextSpan(extracted);
-    if (!consumerSpan.isNoop()) {
-      consumerSpan.kind(Span.Kind.CONSUMER).start();
-      addTags(message, consumerSpan);
-      consumerSpan.finish();
-    }
-
-    // create and scope a span for the message processor
-    threadLocalSpan.next(TraceContextOrSamplingFlags.create(consumerSpan.context()))
-        .name("handle").start();
-
     // remove any trace headers, but don't re-inject as we are synchronously processing the
-    // message and can rely on scoping to access this span later.
+    // message and can rely on normal scoping to access this span later.
     removeAnyTraceHeaders(headers, tracing.propagation().keys());
+
+    // create and scope a span for the message handler
+    threadLocalSpan.next(extracted).name("handle").start();
+    // TODO: decide what tags if any to add here
+
     return new GenericMessage<>(message.getPayload(), headers.getMessageHeaders());
   }
 

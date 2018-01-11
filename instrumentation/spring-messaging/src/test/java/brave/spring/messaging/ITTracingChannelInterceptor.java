@@ -4,8 +4,10 @@ import brave.Span;
 import brave.Tracer;
 import brave.Tracing;
 import brave.propagation.StrictCurrentTraceContext;
+import brave.spring.messaging.SelectableChannelInterceptor.Mode;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import org.junit.After;
 import org.junit.Before;
@@ -43,6 +45,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 @DirtiesContext
 public class ITTracingChannelInterceptor implements MessageHandler {
 
+  @Autowired SelectableChannelInterceptor interceptor;
+
   @Autowired @Qualifier("directChannel") DirectChannel directChannel;
 
   @Autowired @Qualifier("executorChannel") ExecutorChannel executorChannel;
@@ -76,7 +80,7 @@ public class ITTracingChannelInterceptor implements MessageHandler {
 
   // formerly known as TraceChannelInterceptorTest.executableSpanCreation
   @Test public void propagatesNoopSpan() {
-    directChannel.send(MessageBuilder.withPayload("hi")
+    executorChannel.send(MessageBuilder.withPayload("hi")
         .setHeader("X-B3-Sampled", "0").build());
 
     assertThat(message.getHeaders())
@@ -93,35 +97,47 @@ public class ITTracingChannelInterceptor implements MessageHandler {
         .isNotNull();
   }
 
-  //@Test
-  //public void parentSpanIncluded() {
-  //  this.directChannel.send(MessageBuilder.withPayload("hi")
-  //      .setHeader(TraceMessageHeaders.TRACE_ID_NAME, Span.idToHex(10L))
-  //      .setHeader(TraceMessageHeaders.SPAN_ID_NAME, Span.idToHex(20L)).build());
-  //  then(this.message).isNotNull();
-  //
-  //  String spanId = this.message.getHeaders().get(TraceMessageHeaders.SPAN_ID_NAME, String.class);
-  //  then(spanId).isNotNull();
-  //  long traceId = Span
-  //      .hexToId(this.message.getHeaders().get(TraceMessageHeaders.TRACE_ID_NAME, String.class));
-  //  then(traceId).isEqualTo(10L);
-  //  then(spanId).isNotEqualTo(20L);
-  //  then(this.accumulator.getSpans()).hasSize(1);
-  //}
-  //
-  //@Test
-  //public void spanCreation() {
-  //  this.directChannel.send(MessageBuilder.withPayload("hi").build());
-  //  then(this.message).isNotNull();
-  //
-  //  String spanId = this.message.getHeaders().get(TraceMessageHeaders.SPAN_ID_NAME, String.class);
-  //  then(spanId).isNotNull();
-  //
-  //  String traceId = this.message.getHeaders().get(TraceMessageHeaders.TRACE_ID_NAME, String.class);
-  //  then(traceId).isNotNull();
-  //  then(TestSpanContextHolder.getCurrentSpan()).isNull();
-  //}
-  //
+  @Test public void parentSpanIncluded() {
+    directChannel.send(MessageBuilder.withPayload("hi")
+        .setHeader("X-B3-TraceId", "0000000000000001")
+        .setHeader("X-B3-SpanId", "0000000000000002").build());
+
+    assertThat(currentSpan.isNoop()).isFalse();
+
+    assertThat(currentSpan.context().parentId())
+        .isEqualTo(2L);
+  }
+
+  @Test public void spanCreation_onSend() {
+    interceptor.mode = Mode.SEND;
+
+    directChannel.send(MessageBuilder.withPayload("hi").build());
+
+    assertThat(message.getHeaders())
+        .containsKeys("X-B3-TraceId", "X-B3-SpanId")
+        .doesNotContainKeys("X-B3-ParentSpanId")
+        .containsEntry("X-B3-Sampled", "1");
+
+    // the current handler is in a span
+    assertThat(currentSpan.isNoop()).isFalse();
+  }
+
+  @Test public void spanCreation_onHandle() {
+    directChannel.send(MessageBuilder.withPayload("hi").build());
+
+    // no header in injection as the span was created on handle
+    assertThat(message.getHeaders())
+        .doesNotContainKeys("X-B3-TraceId", "X-B3-SpanId");
+
+    // the current handler is in a span
+    assertThat(currentSpan.isNoop()).isFalse();
+
+    assertThat(spans)
+        .hasSize(1)
+        .flatExtracting(zipkin2.Span::kind)
+        .containsExactly(zipkin2.Span.Kind.PRODUCER);
+  }
+
   //@Test
   //public void shouldLogClientReceivedClientSentEventWhenTheMessageIsSentAndReceived() {
   //  this.directChannel.send(MessageBuilder.withPayload("hi").build());
@@ -348,8 +364,12 @@ public class ITTracingChannelInterceptor implements MessageHandler {
       return tracing().tracer();
     }
 
+    @Bean Executor executor() {
+      return Executors.newSingleThreadExecutor();
+    }
+
     @Bean ExecutorChannel executorChannel() {
-      return new ExecutorChannel(Executors.newSingleThreadExecutor());
+      return new ExecutorChannel(executor());
     }
 
     @Bean DirectChannel directChannel() {
@@ -362,7 +382,7 @@ public class ITTracingChannelInterceptor implements MessageHandler {
 
     @Bean @GlobalChannelInterceptor
     public ChannelInterceptor tracingChannelInterceptor(Tracing tracing) {
-      return TracingChannelInterceptor.create(tracing);
+      return new SelectableChannelInterceptor(TracingChannelInterceptor.create(tracing));
     }
   }
 }
