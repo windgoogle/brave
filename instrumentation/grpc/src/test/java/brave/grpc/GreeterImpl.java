@@ -16,7 +16,7 @@ class GreeterImpl extends GreeterGrpc.GreeterImplBase {
   @Nullable final Tracing tracing;
 
   GreeterImpl(@Nullable GrpcTracing grpcTracing) {
-    this.tracing = grpcTracing != null ? grpcTracing.tracing() : null;
+    this.tracing = grpcTracing != null ? grpcTracing.tracing : null;
   }
 
   @Override
